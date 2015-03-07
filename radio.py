@@ -20,7 +20,6 @@ STEREO_DEMODULATE_CARRIER = 38e3
 RADIO = rtlsdr.RtlSdr()
 RADIO.sample_rate = SAMPLE_RATE
 RADIO.gain = GAIN
-RADIO_LOCK = Lock()
 
 RADIO_LOCK = Lock()
 
@@ -29,7 +28,7 @@ AUDIO_QUEUE = Queue()
 AUDIO = pyaudio.PyAudio()
 AUDIO_LOCK = Lock()
 
-class AsyncRadioReceiveDemodulateProcess(Thread):
+class AsyncRadioReceiveDemodulateThread(Thread):
     def __init__(self, carrier, scheme, whichSubband):
         Thread.__init__(self)
         RADIO_LOCK.acquire()
@@ -88,9 +87,34 @@ class AsyncRadioReceiveDemodulateProcess(Thread):
                     # 2. Downsample to a readable frequency
                     downsampled_mono = mono_filtered[0::5]
 
-                    #3. Scale signal to between -1 and 1
-                    queue_data = scale(downsampled_mono)
+                    # 3. Get stereo L-R
 
+                    # frequency-domain convolution to bring L-R to baseband
+                    t_max = BLOCKSIZE / SAMPLE_RATE
+                    t = np.linspace(0, t_max, len(derivative))
+                    stereo_demodulator = np.exp(-2j * np.pi * STEREO_DEMODULATE_CARRIER * t)
+                    stereo_demodulated = np.real(derivative * stereo_demodulator)
+
+                    # filter out high-frequency components
+                    stereo_filtered = signal.fftconvolve(stereo_demodulated, h)
+
+                    # downsample L-R
+                    downsampled_stereo = stereo_filtered[0::5]
+
+                    # calculate left and right components
+                    left = (downsampled_stereo + downsampled_mono)
+                    right = (downsampled_mono - downsampled_stereo)
+
+                    # scale signal
+                    left_scaled = scale(left)
+                    right_scaled = scale(right)
+
+                    # pack stereo queue_data
+                    queue_data = np.empty((left_scaled.size + right_scaled.size,), 
+                                            dtype=left_scaled.dtype)
+                    queue_data[::2] = left_scaled
+                    queue_data[1::2] = right_scaled
+                    
                 else:
                     f_0 = SUBCARRIER_LOW
 
@@ -128,15 +152,16 @@ class AsyncRadioReceiveDemodulateProcess(Thread):
         RADIO_LOCK.release()
 
 
-class AsyncPlayAudioProcess(Thread):
-    def __init__(self):
+class AsyncPlayAudioThread(Thread):
+    def __init__(self, num_channels):
         Thread.__init__(self)
+        self.num_channels = num_channels
 
     def run(self):
 
         AUDIO_LOCK.acquire()
         stream = AUDIO.open(format = pyaudio.paFloat32,
-                        channels = 1,
+                        channels = self.num_channels,
                         rate = AUDIO_FS,
                         output = True)
 
@@ -176,15 +201,19 @@ if __name__ == '__main__':
     if args.AM:
         demodulation_scheme = 'AM'
 
+    num_channels = 1
+    if not args.AM and not subcarrier_frequency:
+        num_channels = 2
+
 
     RADIO.center_freq = carrier_frequency
 
-    radio_process = AsyncRadioReceiveDemodulateProcess(carrier_frequency,
+    radio_process = AsyncRadioReceiveDemodulateThread(carrier_frequency,
                                                     demodulation_scheme, 
                                                     subcarrier_frequency)
     radio_process.daemon = True
 
-    audio_process = AsyncPlayAudioProcess()
+    audio_process = AsyncPlayAudioThread(num_channels)
     audio_process.daemon = True
 
     try:
