@@ -2,7 +2,7 @@ import scipy.signal as signal
 import numpy as np
 import rtlsdr
 import argparse
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from Queue import Queue
 import pyaudio
 import sys
@@ -29,22 +29,19 @@ AUDIO = pyaudio.PyAudio()
 AUDIO_LOCK = Lock()
 
 class AsyncRadioReceiveDemodulateThread(Thread):
-    def __init__(self, carrier, scheme, whichSubband):
+    def __init__(self, carrier, scheme, force_mono, whichSubband):
         Thread.__init__(self)
         RADIO_LOCK.acquire()
         self.carrier = carrier
         self.scheme = scheme
+        self.force_mono = force_mono
         self.whichSubband = whichSubband
 
     def run(self):
 
         def dual_sideband_am_demodulate(sample):
-            f_0 = self.carrier
-            t_max = BLOCKSIZE / SAMPLE_RATE
-            t = np.linspace(0, t_max, len(sample))
-            subcarrier_demodulator = np.exp(-2j * np.pi * f_0 * t)
-            subcarrier_demodulated = sample * subcarrier_demodulator
-            return subcarrier_demodulated
+            return np.absolute(sample)
+            
 
     
         def fm_demodulate(sample):
@@ -70,7 +67,7 @@ class AsyncRadioReceiveDemodulateThread(Thread):
                 demodulated = dual_sideband_am_demodulate(sample)
                 
                 # audio filter
-                h = signal.firwin(128, 5e3, nyq=SAMPLE_RATE / 2.0)
+                h = signal.firwin(128, 1e3, nyq=SAMPLE_RATE / 2.0)
                 am_filtered = signal.fftconvolve(demodulated, h)
 
                 downsampled_am = am_filtered[0::5]
@@ -80,6 +77,7 @@ class AsyncRadioReceiveDemodulateThread(Thread):
                 derivative = fm_demodulate(sample)
                 if not self.whichSubband:
 
+
                     # 1. Low pass filter at 16 kHz
                     h = signal.firwin(128, 16e3, nyq=SAMPLE_RATE / 2.0)
                     mono_filtered = signal.fftconvolve(derivative, h)
@@ -87,40 +85,40 @@ class AsyncRadioReceiveDemodulateThread(Thread):
                     # 2. Downsample to a readable frequency
                     downsampled_mono = mono_filtered[0::5]
 
-                    # 3. Get stereo L-R
+                    if self.force_mono:
+                        queue_data = scale(downsampled_mono)
+                    else:
+                        # Get stereo L-R
 
-                    # frequency-domain convolution to bring L-R to baseband
-                    t_max = BLOCKSIZE / SAMPLE_RATE
-                    t = np.linspace(0, t_max, len(derivative))
-                    stereo_demodulator = np.exp(-2j * np.pi * STEREO_DEMODULATE_CARRIER * t)
-                    stereo_demodulated = np.real(derivative * stereo_demodulator)
+                        # frequency-domain convolution to bring L-R to baseband
+                        t_max = BLOCKSIZE / SAMPLE_RATE
+                        t = np.linspace(0, t_max, len(derivative))
+                        stereo_demodulator = np.exp(-2j * np.pi * STEREO_DEMODULATE_CARRIER * t)
+                        stereo_demodulated = np.real(derivative * stereo_demodulator)
 
-                    # filter out high-frequency components
-                    stereo_filtered = signal.fftconvolve(stereo_demodulated, h)
+                        # filter out high-frequency components
+                        stereo_filtered = signal.fftconvolve(stereo_demodulated, h)
 
-                    # downsample L-R
-                    downsampled_stereo = stereo_filtered[0::5]
+                        # downsample L-R
+                        downsampled_stereo = stereo_filtered[0::5]
 
-                    # calculate left and right components
-                    left = (downsampled_stereo + downsampled_mono)
-                    right = (downsampled_mono - downsampled_stereo)
+                        # calculate left and right components
+                        left = (downsampled_stereo + downsampled_mono)
+                        right = (downsampled_mono - downsampled_stereo)
 
-                    # scale signal
-                    left_scaled = scale(left)
-                    right_scaled = scale(right)
+                        # scale signal
+                        left_scaled = scale(left)
+                        right_scaled = scale(right)
 
-                    # pack stereo queue_data
-                    queue_data = np.empty((left_scaled.size + right_scaled.size,), 
-                                            dtype=left_scaled.dtype)
-                    queue_data[::2] = left_scaled
-                    queue_data[1::2] = right_scaled
+                        # pack stereo queue_data
+                        queue_data = np.empty((left_scaled.size + right_scaled.size,), 
+                                                dtype=left_scaled.dtype)
+                        queue_data[::2] = left_scaled
+                        queue_data[1::2] = right_scaled
                     
                 else:
-                    f_0 = SUBCARRIER_LOW
+                    f_0 = SUBCARRIER_HIGH if self.whichSubband == 'high' else SUBCARRIER_LOW
 
-                    if self.whichSubband == 'high':
-                        f_0 = SUBCARRIER_HIGH
-                        
                     t_max = BLOCKSIZE / SAMPLE_RATE
                     t = np.linspace(0, t_max, len(derivative))
                     subcarrier_demodulator = np.exp(-2j * np.pi * f_0 * t)
@@ -185,6 +183,8 @@ if __name__ == '__main__':
                         help='tune to 92 kHZ subcarrier')
     parser.add_argument('-AM','--AM', action='store_true',
                         help='set demodulation scheme to dual-sideband AM')
+    parser.add_argument('-m', '--mono', action='store_true',
+                        help='force mono-only FM demodulation')
 
     args = parser.parse_args()
 
@@ -201,15 +201,19 @@ if __name__ == '__main__':
     if args.AM:
         demodulation_scheme = 'AM'
 
-    num_channels = 1
-    if not args.AM and not subcarrier_frequency:
-        num_channels = 2
+    force_mono = False
+    if args.mono:
+        force_mono = True
 
+    num_channels = 1
+    if not args.AM and not subcarrier_frequency and not force_mono:
+        num_channels = 2
 
     RADIO.center_freq = carrier_frequency
 
     radio_process = AsyncRadioReceiveDemodulateThread(carrier_frequency,
-                                                    demodulation_scheme, 
+                                                    demodulation_scheme,
+                                                    force_mono, 
                                                     subcarrier_frequency)
     radio_process.daemon = True
 
