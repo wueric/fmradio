@@ -8,7 +8,7 @@ import pyaudio
 import sys
 import time
 
-SUBCARRIER_LOW = 67.5e3
+SUBCARRIER_LOW = 67.65e3
 SUBCARRIER_HIGH = 92e3
 SAMPLE_RATE = 240e3
 GAIN = 36
@@ -62,7 +62,7 @@ class AsyncRadioReceiveDemodulateThread(Thread):
 
 
                 # 1. Low pass filter at 16 kHz
-                h = signal.firwin(128, 16e3, nyq=SAMPLE_RATE / 2.0)
+                h = signal.firwin(256, 16e3, nyq=SAMPLE_RATE / 2.0)
                 mono_filtered = signal.fftconvolve(derivative, h)
                 
                 # 2. Downsample to a readable frequency
@@ -107,7 +107,7 @@ class AsyncRadioReceiveDemodulateThread(Thread):
                 subcarrier_demodulator = np.exp(-2j * np.pi * f_0 * t)
                 subcarrier_demodulated = derivative * subcarrier_demodulator
 
-                subcarrier_passband_filter = signal.firwin(128, cutoff=7.5e3,  
+                subcarrier_passband_filter = signal.firwin(256, cutoff=7.5e3,  
                                                            nyq=SAMPLE_RATE/2)
                 subcarrier_filtered = signal.fftconvolve(
                         subcarrier_demodulated, 
@@ -119,7 +119,7 @@ class AsyncRadioReceiveDemodulateThread(Thread):
 
                 scaled_subcarrier = scale(downsampled_subcarrier)
 
-                audio_lowpass_h = signal.firwin(128, cutoff=7.5e3, nyq=AUDIO_FS/2)
+                audio_lowpass_h = signal.firwin(256, cutoff=7.5e3, nyq=AUDIO_FS/2)
 
                 queue_data = signal.fftconvolve(audio_lowpass_h, scaled_subcarrier)
 
